@@ -89,7 +89,8 @@ class PreflightTests(unittest.TestCase):
         serialized = json.dumps(report)
         self.assertNotIn("private trace content", serialized)
         self.assertEqual(report["skipped_asr_positive"], 1)
-        self.assertIn("skipped: local-b", format_text(report))
+        self.assertIn("potentially omitted: local-b", format_text(report))
+        self.assertEqual(report["results"][0]["reconciliation"]["selected_coverage_pct"], 50.0)
 
     def test_cli_json_output_and_exit_status(self):
         trace(self.root / "local-a")
@@ -100,6 +101,70 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(code, 2)
         result = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(result["skipped_asr_positive"], 1)
+
+    def test_selected_malformed_is_risk_and_unknown(self):
+        trace(self.root / "local", valid=False)
+        result = inspect_run("test", self.root)
+        self.assertEqual(result["reconciliation"]["unknown_eligibility"], 1)
+        self.assertIsNone(result["reconciliation"]["selected_coverage_pct"])
+        self.assertTrue(result["risk"])
+
+    def test_non_object_record_can_abort_upstream(self):
+        path = trace(self.root / "local")
+        path.write_text("[]", encoding="utf-8")
+        result = inspect_run("test", self.root)
+        self.assertEqual(result["selected"]["invalid_record"], 1)
+        self.assertTrue(result["risk"])
+        self.assertTrue(any("abort" in a for a in result["corrective_actions"]))
+
+    def test_ignored_paths_do_not_create_false_positive(self):
+        trace(self.root / "local-a")
+        trace(self.root / "local-b", name="other.json")
+        trace(self.root / "local-b" / "banking" / "user_task_2" / "none")
+        trace(self.root / "local-b" / "banking" / "not_a_user_task")
+        trace(self.root / ".hidden")
+        result = inspect_run("test", self.root)
+        self.assertEqual(result["skipped"][0]["asr_positive"], 0)
+        self.assertFalse(result["risk"])
+
+    def test_missing_security_is_unknown_not_positive(self):
+        trace(self.root / "local-a")
+        path = trace(self.root / "local-b")
+        path.write_text('{"messages": []}', encoding="utf-8")
+        r = inspect_run("test", self.root)["reconciliation"]
+        self.assertEqual((r["known_positive_total"], r["unknown_eligibility"]), (1, 1))
+        self.assertEqual(r["selected_coverage_pct"], 100.0)
+
+    def test_truthy_security_matches_upstream_even_when_non_boolean(self):
+        trace(self.root / "local-a", security=False)
+        trace(self.root / "local-b", security="true")
+        r = inspect_run("test", self.root)
+        self.assertEqual(r["reconciliation"]["potentially_omitted_positive"], 1)
+        self.assertEqual(r["reconciliation"]["selected_coverage_pct"], 0.0)
+
+    def test_no_model_directories_has_no_coverage_denominator(self):
+        r = inspect_run("test", self.root)
+        self.assertEqual(r["selection"], "unresolved")
+        self.assertIsNone(r["reconciliation"]["selected_coverage_pct"])
+        self.assertTrue(r["risk"])
+
+    def test_positive_paths_are_relative_and_do_not_include_payload(self):
+        trace(self.root / "local-a")
+        trace(self.root / "local-b")
+        r = inspect_run("test", self.root)
+        self.assertEqual(r["skipped"][0]["positive_paths"],
+                         ["banking/user_task_0/attack_0/injection_task_0.json"])
+        self.assertNotIn("private trace content", json.dumps(r))
+
+    def test_runs_root_excludes_upstream_audit_results_directory(self):
+        parent = Path(self.tmp.name) / "runs"
+        trace(parent / "cell" / "local")
+        (parent / "audit_results_old").mkdir()
+        output = Path(self.tmp.name) / "report.json"
+        self.assertEqual(main(["--runs-root", str(parent), "--format", "json",
+                               "--output", str(output)]), 0)
+        report = json.loads(output.read_text())
+        self.assertEqual([r["name"] for r in report["results"]], ["cell"])
 
 
 if __name__ == "__main__":

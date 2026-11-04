@@ -1,65 +1,45 @@
 # ICoA Audit Preflight
 
-A **read-only, dependency-free** diagnostic for potential audit-coverage gaps in the published [ICoA evaluation workflow](https://github.com/yslmoment/ICoA).
+An independent, read-only check of **which ICoA trace files are eligible for the published auditors to see**. It does not judge covert/overt outcomes or validate reported attack success rates. It needs Python 3.10+, its standard library, and access to local run directories. There are no paid API calls, GPU steps, or model training.
 
-The original `auditor/judge.py` and `auditor/judge_batch.py` each select **one** immediate model-output subdirectory per benchmark run: the first sorted `local*` directory, or the only non-hidden subdirectory if there is exactly one. ICoA's README documents this behavior as a reproduction note, **not an undiscovered bug**. If several model-output directories coexist, other positive-security traces may not be audited.
+The [ICoA upstream README](https://github.com/yslmoment/ICoA#reproduction-notes) already documents that both auditors select the first sorted `local*` directory from each run parent (or fall back to its sole non-hidden model directory). This tool turns that documented limitation into a per-run **reconciliation**: selected and potentially omitted truthy-`security` files, a percentage over known positives, unknown records, exact relative trace paths, and steps for auditing the omitted model output separately.
 
-This independently developed utility **does not change the original auditors, retrain models, perform LLM inference, send API requests, or publish attack traces**. It identifies directory-selection decisions and counts candidate ASR-positive (`security` truthy) trace files, providing evidence before an audit job runs. It is not an official ICoA tool and is not endorsed by its authors.
-
-## Quick start
-
-Requires Python **3.10+**. No dependencies or API keys.
+## Run it
 
 ```bash
-# Check one ICoA run directory (the directory containing local/ or local-<defense>/)
-python icoa_preflight.py --run icoa=runs/llama33_task_shield
+# From this repository root; PATH is the parent of local/ or local-<defense>/
+python icoa_preflight.py --run icoa=/path/to/runs/llama33_task_shield
 
-# Or scan one level below a runs root (each immediate child treated as a run)
-python icoa_preflight.py --runs-root runs/
+# Discover all immediate run parents in a root (as in upstream run_auditor.sh)
+python icoa_preflight.py --runs-root /path/to/runs
 
-# Save a structured JSON report and fail CI if coverage may be incomplete
-python icoa_preflight.py --runs-root runs/ --format json --output coverage.json --fail-on-risk
-```
+# Save the report; exit 2 on a coverage or metadata risk (0 otherwise)
+python icoa_preflight.py --runs-root /path/to/runs --format json \
+  --output coverage.json --fail-on-risk
 
-**Example output from synthetic fixture data — not actual ICoA results:**
+# Run the reproducible synthetic demonstration (creates and removes temporary files)
+python -m examples.demo
 
-```text
-ICoA Audit Preflight | runs checked: 1 | runs at risk: 1
-
-[demo] selected=local-a (first_local)
-  included: 1 traces; ASR-positive=1
-  skipped: local-b (2 traces, ASR-positive=1, unknown=0)
-  WARNING: 1 ASR-positive trace(s) occur outside the upstream-selected directory.
-
-ASR-positive traces outside selected directories: 1
-```
-
-## What it detects
-
-- Multiple `local*` directories where only the first sorted model directory would be selected.
-- Multiple non-`local*` directories where upstream selection returns `None`.
-- ASR-positive candidate trace files outside the chosen directory, following the upstream directory structure.
-- Malformed JSON or missing `security` flags outside the chosen directory: flagged as **unknown**, not automatically counted as positive.
-- Missing/unreadable run directories and malformed trace files in the chosen directory.
-
-It intentionally reports **counts and directory paths only**, not trace payloads. A positive `security` flag is only an *input eligibility check* for the upstream auditor: this utility does **not** validate attack outcomes, auditor judgments, or scientific scores.
-
-## Test
-
-```bash
 python -m unittest discover -s tests -v
 ```
 
-Tests use synthetic temporary directories and no external research data.
+The scanner reads traces in `MODEL/SUITE/user_task_*/ATTACK/injection_task_*.json`, skipping attack directory `none`. This follows the traversal in [`auditor/judge.py`](https://github.com/yslmoment/ICoA/blob/4c272d74a19e3a1fb072ee7b064d602f9187e354/auditor/judge.py) and [`auditor/judge_batch.py`](https://github.com/yslmoment/ICoA/blob/4c272d74a19e3a1fb072ee7b064d602f9187e354/auditor/judge_batch.py). Upstream truth-tests `security` rather than requiring a Boolean. Trace contents do not appear in reports; directory and relative file names do.
 
-## Reference and credit
+### Reading coverage
 
-The selection behavior was checked against the published `resolve_local()` implementations in:
+`selected_coverage_pct = 100 × selected_positive / (selected_positive + potentially_omitted_positive)`, rounded to two decimal places. The denominator includes **only observed truthy-security records in recognized paths**. If it is zero, coverage is `null` / N/A. `unknown_eligibility` is shown separately and is never silently folded into this denominator. The percentage does not mean the LLM judge ran successfully: `--limit`, missing canonical goals in the synchronous auditor, API errors, or batch submission/completion can still prevent judgments.
 
-- [yslmoment/ICoA — auditor/judge.py](https://github.com/yslmoment/ICoA/blob/main/auditor/judge.py)
-- [yslmoment/ICoA — auditor/judge_batch.py](https://github.com/yslmoment/ICoA/blob/main/auditor/judge_batch.py)
-- [ICoA README reproduction notes](https://github.com/yslmoment/ICoA#reproduction-notes)
+Malformed JSON is skipped by upstream iteration. Missing `security` is skipped by `record.get("security")`, but is flagged here for manual provenance review. **Valid JSON that is not an object is different:** upstream may raise on `.get` and abort iteration. Unreadable directories cause the preflight to report a scan error rather than estimate coverage.
 
-Original paper: Yunseok Lee, Yunji Kim, and Woojin Lee. *Will the User Ever Know? Covert Indirect Prompt Injection Attacks on Tool-Using LLM Agents* (EMNLP 2026). See the original repository for complete citation and license information.
+When a model directory has omitted positives, place it **alone inside a separate run parent** and supply that parent through the original auditor's `--run NAME=PATH`. Do not pass the model directory itself as a run parent. If preserving inputs matters, make a copy or a suitable filesystem link and verify the destination before running the original auditor; this preflight never does that operation.
 
-This project is independently authored and offered as an optional reproducibility aid. The authors have not been contacted about or approved this utility.
+## Synthetic demonstration
+
+`python -m examples.demo` creates an ICoA-shaped run with `local-a` and `local-b`. The upstream selector chooses `local-a`. The fixture has one positive there, two positives in `local-b`, one negative, one missing-security record, and one malformed record. The expected reconciliation is **1/3 known positives selected = 33.33%**, with **two unknowns**. This is an engineered example, **not an ICoA experimental result**. The script asserts these numbers and displays the corrective action.
+
+## Scope and attribution
+
+- Original ICoA: [yslmoment/ICoA](https://github.com/yslmoment/ICoA), source commit `4c272d74a19e3a1fb072ee7b064d602f9187e354`. See its citation and license for the paper and original research implementation.
+- Detailed code audit and reproducible evidence: [VALIDATION.md](VALIDATION.md).
+- This is independently developed, unreviewed by the original authors, and does not modify either auditor or the upstream repository.
+- The useful addition is **a quantified, actionable preflight report for particular run directories**. It does not discover an undocumented upstream bug, prove that actual published results omitted traces, or replace the existing reproduction note.
